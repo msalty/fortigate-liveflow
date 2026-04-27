@@ -4,11 +4,13 @@ Lightweight standalone live traffic dashboard for FortiGate sessions in Go and H
 
 ## Run
 
+1.) Download.
+
+2.) Navigate to Directory and Run:
 ```bash
 go run .
 ```
-
-Then open http://localhost:8080.
+3.) Open http://localhost:8080 for UI
 
 ## Recent feature additions
 
