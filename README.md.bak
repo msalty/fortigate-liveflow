@@ -23,10 +23,3 @@ Then open http://localhost:8080.
 ## Security note
 
 Use a dedicated read-only API admin/token where possible. Saving tokens/passwords writes them to a local JSON settings file with user-only file permissions where the OS supports it.
-
-## v15 changes
-
-- Added an egress-interface filter above the conversations table.
-- Selecting an interface immediately filters the main conversation chart, aggregate overview chart, and conversations table.
-- Clear Interface Filter restores the all-flow view.
-- Show All / Hide All now applies to the current filtered table view.

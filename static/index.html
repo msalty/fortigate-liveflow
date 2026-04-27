@@ -1,0 +1,118 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>FortiGate LiveFlow</title>
+  <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+<div class="shell">
+  <header>
+    <div>
+      <div class="eyebrow">Standalone live traffic dashboard</div>
+      <h1>FortiGate LiveFlow</h1>
+    </div>
+    <div class="pill" id="statePill">Stopped</div>
+  </header>
+  <main>
+    <section class="panel controls">
+      <h2>Connection</h2>
+      <div class="grid">
+        <label>FortiGate Host<input id="host" placeholder="https://192.0.2.1"></label>
+        <label>VDOM<input id="vdom" value="root"></label>
+        <label>API Token<input id="token" type="password" placeholder="Recommended"></label>
+        <label>Username<input id="username" placeholder="Optional"></label>
+        <label>Password<input id="password" type="password" placeholder="Optional"></label>
+        <label>Poll period<select id="poll"><option value="5" selected>5 seconds</option><option value="10">10 seconds</option><option value="15">15 seconds</option><option value="30">30 seconds</option><option value="60">60 seconds</option></select></label>
+        <label>Rolling history<select id="window"><option value="5">5 minutes</option><option value="15" selected>15 minutes</option><option value="30">30 minutes</option><option value="60">60 minutes</option></select></label>
+        <label>Max conversations<select id="topn"><option>25</option><option selected>50</option><option>100</option><option>200</option></select></label>
+        <label class="check"><input id="insecure" type="checkbox" checked> Allow self-signed TLS</label>
+        <label class="check"><input id="demo" type="checkbox"> Demo mode</label>
+      </div>
+
+      <details open>
+        <summary>Resolution settings</summary>
+        <div class="grid detailsGrid">
+          <label class="check"><input id="resolveDevices" type="checkbox"> Resolve internal devices</label>
+          <label>Device refresh<select id="deviceResolveSeconds"><option value="60">1 minute</option><option value="300" selected>5 minutes</option><option value="900">15 minutes</option><option value="1800">30 minutes</option></select></label>
+          <label>Device command<input id="deviceCommand" value="diagnose user device list"></label>
+          <label>Device API path<input id="deviceEndpoint" value="/api/v2/monitor/user/device/query"></label>
+          <label class="check"><input id="resolveExternalDns" type="checkbox"> Resolve external FQDNs</label>
+          <label>DNS server<input id="dnsServer" placeholder="1.1.1.1 or 192.168.128.1"></label>
+          <label>DNS cache<select id="dnsCacheMinutes"><option value="5">5 minutes</option><option value="15">15 minutes</option><option value="60" selected>1 hour</option><option value="240">4 hours</option></select></label>
+        </div>
+        <p class="hint">Device lookup defaults to FortiGate’s user/device/query REST endpoint and falls back to parsing diagnose user device list output if you point it at a console endpoint. DNS lookup uses PTR/reverse DNS against the specified server.</p>
+      </details>
+
+      <details>
+        <summary>Advanced endpoint</summary>
+        <input id="endpoint" value="/api/v2/monitor/firewall/session?count=1000">
+      </details>
+
+      <details open>
+        <summary>Saved settings</summary>
+        <div class="grid detailsGrid">
+          <label class="check"><input id="saveSettings" type="checkbox"> Save settings locally</label>
+          <label class="check"><input id="saveSecrets" type="checkbox"> Also save token/password</label>
+        </div>
+        <p class="hint">Saved settings are written to this computer's user config directory. Leave “save token/password” off if you only want non-secret preferences saved.</p>
+      </details>
+      <div class="actions"><button id="saveStart">Save & Start</button><button id="stop" class="secondary">Stop</button></div>
+      <p class="hint">Credentials and traffic samples are held only in memory. The live chart shows a flexible live viewport based on screen width; use the overview brush to review retained history. Pause freezes charts while collection continues.</p>
+    </section>
+
+    <section class="dashboard">
+      <div class="cards">
+        <div class="card"><span>Total</span><strong id="total">0 Mbps</strong></div>
+        <div class="card"><span>Sessions</span><strong id="sessions">0</strong></div>
+        <div class="card"><span>Last Poll</span><strong id="lastPoll">Never</strong></div>
+      </div>
+
+      <div class="panel chartPanel">
+        <div class="chartHead">
+          <div><h2>Selected conversation bandwidth</h2><p id="subtitle">Waiting for samples…</p></div>
+          <div class="chartActions"><button id="pauseCharts" class="ghost">Pause</button><button id="clear" class="ghost">Clear chart</button></div>
+        </div>
+        <svg id="chart" viewBox="0 0 1000 430" preserveAspectRatio="xMinYMin meet"></svg>
+        <div class="timelineControls compact">
+          <span id="rangeLabel">Live: last 2 minutes</span>
+          <button id="goLive" class="ghost">Live</button>
+        </div>
+        <div id="tooltip" class="tooltip" hidden></div>
+      </div>
+
+      <div class="panel miniPanel">
+        <div class="chartHead">
+          <div><h2>Aggregate bandwidth overview</h2><p id="miniSubtitle">Drag the highlighted window to review retained history</p></div>
+        </div>
+        <svg id="miniChart" viewBox="0 0 1000 120" preserveAspectRatio="xMinYMin meet"></svg>
+      </div>
+
+      <div class="panel conversations">
+        <div class="chartHead conversationsHead">
+          <div><h2>Conversations</h2><p id="conversationCount">No active conversation deltas yet</p></div>
+          <div class="filterActions">
+            <label class="filterLabel">Egress interface
+              <select id="egressFilter"><option value="">All interfaces</option></select>
+            </label>
+            <button id="clearEgressFilter" class="ghost">Clear interface filter</button>
+            <button id="showAll" class="ghost">Show all</button>
+            <button id="hideAll" class="ghost">Hide all</button>
+          </div>
+        </div>
+        <div class="tableWrap">
+          <table>
+            <thead><tr><th>Show</th><th>Source Device</th><th>Source IP</th><th>Destination</th><th>Destination IP</th><th>Destination Port</th><th>Current Bandwidth</th><th>Egress Interface</th></tr></thead>
+            <tbody id="conversationRows"></tbody>
+          </table>
+        </div>
+      </div>
+
+      <div class="panel statusPanel"><h2>Status</h2><pre id="status">Ready.</pre></div>
+    </section>
+  </main>
+</div>
+<script src="/static/app.js"></script>
+</body>
+</html>
