@@ -1,6 +1,6 @@
-# FortiGate LiveFlow v10
+# FortiGate LiveFlow
 
-Lightweight standalone live traffic dashboard for FortiGate sessions.
+Lightweight standalone live traffic dashboard for FortiGate sessions in Go and HTML.
 
 ## Run
 
@@ -10,7 +10,7 @@ go run .
 
 Then open http://localhost:8080.
 
-## New in v10
+## Recent feature additions
 
 - Conversation table includes optional source device and destination FQDN columns.
 - Internal device resolution can be enabled in **Resolution settings**.
@@ -24,7 +24,7 @@ Then open http://localhost:8080.
 
 Use a dedicated read-only API admin/token where possible. Saving tokens/passwords writes them to a local JSON settings file with user-only file permissions where the OS supports it.
 
-## v15 changes
+## v0.15 changes
 
 - Added an egress-interface filter above the conversations table.
 - Selecting an interface immediately filters the main conversation chart, aggregate overview chart, and conversations table.
