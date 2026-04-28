@@ -1,5 +1,7 @@
 # FortiGate LiveFlow
 
+![FortiGate-LiveFlow Screenshots](images/fortigate-liveflow-screenshot01.jpg)
+
 Lightweight standalone live traffic dashboard for FortiGate sessions in Go, JS and HTML.
 
 ## Run
