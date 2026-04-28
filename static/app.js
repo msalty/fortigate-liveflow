@@ -1,6 +1,9 @@
 const $ = id => document.getElementById(id);
 let buckets = [];
 let conversations = [];
+let deviceNames = {};
+let dnsNames = {};
+let dnsNoPtr = {};
 let hiddenSeries = new Set();
 let liveMode = true;
 let viewportOffset = 0;
@@ -10,6 +13,24 @@ let brushDrag = null;
 let pausedCharts = false;
 let frozenBuckets = [];
 const BASE_VIEWPORT_SECONDS = 120;
+const SIDEBAR_KEY = 'fortigateLiveFlow.sidebarCollapsed';
+function setSidebarCollapsed(collapsed){
+  document.body.classList.toggle('sidebar-collapsed', !!collapsed);
+  const btn = $("sidebarToggle");
+  if(btn){
+    btn.setAttribute('aria-expanded', String(!collapsed));
+    btn.title = collapsed ? 'Show connection settings' : 'Hide connection settings';
+  }
+  localStorage.setItem(SIDEBAR_KEY, collapsed ? '1' : '0');
+  setTimeout(()=>drawAll(), 320);
+}
+function initSidebar(){
+  const saved = localStorage.getItem(SIDEBAR_KEY) === '1';
+  setSidebarCollapsed(saved);
+  const btn = $("sidebarToggle");
+  if(btn) btn.onclick = () => setSidebarCollapsed(!document.body.classList.contains('sidebar-collapsed'));
+}
+
 const colors = ['#6ee7b7','#60a5fa','#c084fc','#fbbf24','#fb7185','#34d399','#38bdf8','#f472b6','#a3e635','#f97316','#818cf8','#22d3ee','#f59e0b','#2dd4bf','#e879f9','#93c5fd','#fdba74','#86efac','#67e8f9','#f0abfc'];
 
 function cfg(){return{host:$('host').value.trim(),vdom:$('vdom').value.trim()||'root',apiToken:$('token').value,username:$('username').value,password:$('password').value,insecureTLS:$('insecure').checked,pollSeconds:+$('poll').value,windowMinutes:+$('window').value,groupBy:'conversation',topN:+$('topn').value,demoMode:$('demo').checked,endpoint:$('endpoint').value.trim(),resolveDevices:$('resolveDevices').checked,deviceResolveSeconds:+$('deviceResolveSeconds').value,deviceEndpoint:$('deviceEndpoint').value.trim(),deviceCommand:$('deviceCommand').value.trim(),resolveExternalDns:$('resolveExternalDns').checked,dnsServer:$('dnsServer').value.trim(),dnsCacheMinutes:+$('dnsCacheMinutes').value,saveSettings:$('saveSettings').checked,saveSecrets:$('saveSecrets').checked}}
@@ -55,11 +76,11 @@ async function load(){const r=await fetch('/api/snapshot');apply(await r.json())
 let hydrated=false;
 function apply(s){
   if(!hydrated){hydrateConfig(s.config);hydrated=true;}
-  buckets=s.buckets||[];conversations=s.conversations||[];const st=s.status||{};
+  buckets=s.buckets||[];conversations=s.conversations||[];deviceNames=s.deviceNames||{};dnsNames=s.dnsNames||{};dnsNoPtr=s.dnsNoPtr||{};const st=s.status||{};
   $('statePill').textContent=st.running?'Running':'Stopped';$('statePill').className='pill '+(st.running?'running':'');
   $('total').textContent=fmtMbps(st.totalMbps||0);$('sessions').textContent=(st.sessionCount||0).toLocaleString();$('lastPoll').textContent=st.lastPoll?new Date(st.lastPoll).toLocaleTimeString():'Never';
   $('subtitle').textContent=buckets.length?`${buckets.length} retained buckets. Displaying a ${Math.round(viewportSeconds()/60*10)/10}-minute ${pausedCharts?'paused':(liveMode?'live':'historical')} viewport.`:'Waiting for two successful polls…';
-  setStatus(st.lastError?`Last error: ${st.lastError}`:(st.deviceResolverStatus?`Healthy. ${st.deviceResolverStatus}`:'Healthy.'));
+  setStatus(st.lastError?`Last error: ${st.lastError}`:`Healthy. Device mappings: ${st.deviceMappings||Object.keys(deviceNames).length||0}. PTR resolved: ${st.dnsResolved||Object.keys(dnsNames).length||0}. No PTR: ${st.dnsNoPtr||Object.keys(dnsNoPtr).length||0}${st.deviceResolveError?` — device resolver: ${st.deviceResolveError}`:''}${st.lastDnsError?` — DNS: ${st.lastDnsError}`:''}`);
   refreshEgressFilterOptions();clampViewport();drawAll();renderConversations();
 }
 
@@ -132,7 +153,21 @@ function onChartMove(ev){
   for(const k of keys){const v=row.vals[k]; if(v && yVal>=v[0] && yVal<=v[1] && v[2]>0){hit={key:k,bps:v[2]}; break;}}
   if(!hit) return hideTooltip();
   const parts=parseConversation(hit.key);
-  showTooltip(ev, `<b>${esc(hit.key)}</b><br><span>${new Date(row.t*1000).toLocaleTimeString()}</span><br>Bandwidth: <b>${fmtMbpsFromBps(hit.bps)}</b>${parts?`<br>Source: ${esc(parts.src)}<br>Destination: ${esc(parts.dst)}<br>Port: ${esc(parts.port)}`:''}`);
+  const bucketMeta=(row.bucket && row.bucket.meta && row.bucket.meta[hit.key]) || {};
+  const liveConvo=conversationMap().get(hit.key) || {};
+  // Merge without letting empty live fields overwrite resolved bucket metadata.
+  const pick=(...vals)=>{for(const v of vals){if(v!==undefined && v!==null && String(v).trim()!=='') return v;} return ''};
+  const srcIp=pick(liveConvo.sourceIp, bucketMeta.sourceIp, parts&&parts.src);
+  const dstIp=pick(liveConvo.destinationIp, bucketMeta.destinationIp, parts&&parts.dst);
+  const port=pick(liveConvo.destinationPort, bucketMeta.destinationPort, parts&&parts.port);
+  const egress=pick(liveConvo.egressInterface, bucketMeta.egressInterface, row.bucket && row.bucket.interfaces && row.bucket.interfaces[hit.key]);
+  const srcName=pick(liveConvo.sourceName, bucketMeta.sourceName, deviceNames[srcIp], dnsNames[srcIp]);
+  const dstName=pick(liveConvo.destinationName, bucketMeta.destinationName, deviceNames[dstIp], dnsNames[dstIp]);
+  const srcUnresolved = srcIp && dnsNoPtr[srcIp] ? 'no PTR record' : 'unresolved';
+  const dstUnresolved = dstIp && dnsNoPtr[dstIp] ? 'no PTR record' : 'unresolved';
+  const sourceLine = `<br>Source device/FQDN: <b>${esc(srcName || srcUnresolved)}</b>`;
+  const destLine = `<br>Destination device/FQDN: <b>${esc(dstName || dstUnresolved)}</b>`;
+  showTooltip(ev, `<b>${esc(hit.key)}</b><br><span>${new Date(row.t*1000).toLocaleTimeString()}</span><br>Bandwidth: <b>${fmtMbpsFromBps(hit.bps)}</b>${sourceLine}${srcIp?`<br>Source IP: ${esc(srcIp)}`:''}${destLine}${dstIp?`<br>Destination IP: ${esc(dstIp)}`:''}${port?`<br>Port: ${esc(port)}`:''}${egress?`<br>Egress: ${esc(egress)}`:''}`);
 }
 function parseConversation(label){const m=String(label).match(/^(.*?)\s+→\s+(.*?):(\d+)(?:\s+(\w+))?$/);return m?{src:m[1],dst:m[2],port:m[3],proto:m[4]||''}:null}
 function showTooltip(ev, html){const t=$('tooltip');t.innerHTML=html;t.hidden=false;const pad=14;t.style.left=(ev.clientX+pad)+'px';t.style.top=(ev.clientY+pad)+'px'}
@@ -161,4 +196,5 @@ function escAttr(s){return esc(s).replace(/"/g,'&quot;')}
 setInterval(()=>{if(liveMode && !pausedCharts)drawAll()},1000);
 window.addEventListener('resize',()=>{drawAll()});
 updatePauseButton();
+initSidebar();
 load();connect();
