@@ -53,18 +53,25 @@ type Config struct {
 	SaveSecrets          bool   `json:"saveSecrets"`
 }
 type Bucket struct {
-	T          int64              `json:"t"`
-	Series     map[string]float64 `json:"series"`
-	Interfaces map[string]string  `json:"interfaces,omitempty"`
-	Total      float64            `json:"total"`
+	T          int64                   `json:"t"`
+	Series     map[string]float64      `json:"series"`
+	Interfaces map[string]string       `json:"interfaces,omitempty"`
+	Meta       map[string]Conversation `json:"meta,omitempty"`
+	Total      float64                 `json:"total"`
 }
 
 type Status struct {
-	Running      bool    `json:"running"`
-	LastPoll     string  `json:"lastPoll"`
-	LastError    string  `json:"lastError"`
-	SessionCount int     `json:"sessionCount"`
-	TotalMbps    float64 `json:"totalMbps"`
+	Running            bool    `json:"running"`
+	LastPoll           string  `json:"lastPoll"`
+	LastError          string  `json:"lastError"`
+	SessionCount       int     `json:"sessionCount"`
+	TotalMbps          float64 `json:"totalMbps"`
+	DeviceMappings     int     `json:"deviceMappings"`
+	LastDeviceResolve  string  `json:"lastDeviceResolve"`
+	DeviceResolveError string  `json:"deviceResolveError"`
+	DNSResolved        int     `json:"dnsResolved"`
+	DNSNoPTR           int     `json:"dnsNoPtr"`
+	LastDNSError       string  `json:"lastDnsError"`
 }
 
 type Conversation struct {
@@ -88,6 +95,7 @@ type SessionSample struct {
 type nameCacheEntry struct {
 	Name string
 	T    time.Time
+	Err  string
 }
 
 type App struct {
@@ -103,6 +111,8 @@ type App struct {
 	deviceNames          map[string]string
 	dnsCache             map[string]nameCacheEntry
 	lastDeviceResolve    time.Time
+	lastDeviceError      string
+	lastDNSError         string
 }
 
 func main() {
@@ -224,11 +234,63 @@ func (a *App) handleStop(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, map[string]any{"ok": true})
 }
 
+func (a *App) dnsSnapshotLocked() (map[string]string, map[string]bool, int, int) {
+	names := map[string]string{}
+	noPTR := map[string]bool{}
+	resolved := 0
+	missing := 0
+	now := time.Now()
+	ttl := time.Duration(a.cfg.DNSCacheMinutes) * time.Minute
+	if ttl <= 0 {
+		ttl = time.Hour
+	}
+	for ip, ent := range a.dnsCache {
+		if now.Sub(ent.T) > ttl {
+			continue
+		}
+		if ent.Name != "" {
+			names[ip] = ent.Name
+			resolved++
+		} else {
+			noPTR[ip] = true
+			missing++
+		}
+	}
+	return names, noPTR, resolved, missing
+}
+
 func (a *App) handleSnapshot(w http.ResponseWriter, r *http.Request) {
 	a.mu.Lock()
-	snap := map[string]any{"config": sanitized(a.cfg), "status": a.status, "buckets": append([]Bucket(nil), a.buckets...), "conversations": append([]Conversation(nil), a.currentConversations...)}
+	buckets := a.enrichedBucketsLocked()
+	convs := append([]Conversation(nil), a.currentConversations...)
+	a.enrichConversationsLocked(convs)
+	dnsNames, dnsNoPTR, _, _ := a.dnsSnapshotLocked()
+	snap := map[string]any{"config": sanitized(a.cfg), "status": a.status, "buckets": buckets, "conversations": convs, "deviceNames": a.deviceNames, "dnsNames": dnsNames, "dnsNoPtr": dnsNoPTR}
 	a.mu.Unlock()
 	writeJSON(w, snap)
+}
+
+func (a *App) enrichConversationsLocked(convs []Conversation) {
+	for i := range convs {
+		a.enrichConversationNames(context.Background(), a.cfg, &convs[i], false)
+	}
+}
+
+func (a *App) enrichedBucketsLocked() []Bucket {
+	out := make([]Bucket, len(a.buckets))
+	for i, b := range a.buckets {
+		out[i] = b
+		if b.Meta == nil {
+			continue
+		}
+		meta := make(map[string]Conversation, len(b.Meta))
+		for k, c := range b.Meta {
+			a.enrichConversationNames(context.Background(), a.cfg, &c, false)
+			meta[k] = c
+		}
+		out[i].Meta = meta
+	}
+	return out
 }
 
 func (a *App) handleEvents(w http.ResponseWriter, r *http.Request) {
@@ -344,7 +406,13 @@ func (a *App) pollOnce(ctx context.Context, cfg Config) {
 	}
 	a.prev = nextPrev
 	currentConversations := a.decorateConversations(ctx, cfg, conversationsFromMaps(convoBps, convoMeta))
-	bucket := Bucket{T: now, Series: series, Interfaces: seriesInterfaces, Total: total}
+	seriesMeta := make(map[string]Conversation, len(currentConversations))
+	for _, c := range currentConversations {
+		if c.Label != "" {
+			seriesMeta[c.Label] = c
+		}
+	}
+	bucket := Bucket{T: now, Series: series, Interfaces: seriesInterfaces, Meta: seriesMeta, Total: total}
 	if len(prev) > 0 {
 		a.buckets = append(a.buckets, bucket)
 	}
@@ -361,7 +429,8 @@ func (a *App) pollOnce(ctx context.Context, cfg Config) {
 		lastErr = err.Error()
 	}
 	a.currentConversations = currentConversations
-	a.status = Status{Running: a.running, LastPoll: time.Now().Format(time.RFC3339), LastError: lastErr, SessionCount: len(samples), TotalMbps: total / 1000000}
+	_, _, dnsResolved, dnsNoPTR := a.dnsSnapshotLocked()
+	a.status = Status{Running: a.running, LastPoll: time.Now().Format(time.RFC3339), LastError: lastErr, SessionCount: len(samples), TotalMbps: total / 1000000, DeviceMappings: len(a.deviceNames), LastDeviceResolve: a.lastDeviceResolve.Format(time.RFC3339), DeviceResolveError: a.lastDeviceError, DNSResolved: dnsResolved, DNSNoPTR: dnsNoPTR, LastDNSError: a.lastDNSError}
 	a.mu.Unlock()
 	a.broadcastSnapshot()
 }
@@ -375,23 +444,54 @@ func (a *App) decorateConversations(ctx context.Context, cfg Config, convs []Con
 		if names, err := collectDeviceNames(ctx, cfg); err == nil {
 			a.deviceNames = names
 			a.lastDeviceResolve = now
+			a.lastDeviceError = ""
 		} else {
+			a.lastDeviceError = err.Error()
 			a.status.LastError = "device resolve: " + err.Error()
 		}
 	}
 	for i := range convs {
+		a.enrichConversationNames(ctx, cfg, &convs[i], true)
+	}
+	return convs
+}
+
+func (a *App) enrichConversationNames(ctx context.Context, cfg Config, c *Conversation, allowLookup bool) {
+	if c == nil {
+		return
+	}
+	if c.SourceName == "" {
 		if cfg.ResolveDevices {
-			if n := a.deviceNames[convs[i].SourceIP]; n != "" {
-				convs[i].SourceName = n
+			if n := a.deviceNames[c.SourceIP]; n != "" {
+				c.SourceName = n
 			}
 		}
-		if cfg.ResolveExternalDNS && cfg.DNSServer != "" && isExternalIP(convs[i].DestinationIP) {
-			if n := a.resolvePTR(ctx, convs[i].DestinationIP, cfg); n != "" {
-				convs[i].DestinationName = n
+		if c.SourceName == "" && cfg.ResolveExternalDNS && cfg.DNSServer != "" && isExternalIP(c.SourceIP) {
+			if allowLookup {
+				if n := a.resolvePTR(ctx, c.SourceIP, cfg); n != "" {
+					c.SourceName = n
+				}
+			} else if ent, ok := a.dnsCache[c.SourceIP]; ok {
+				c.SourceName = ent.Name
 			}
 		}
 	}
-	return convs
+	if c.DestinationName == "" {
+		if cfg.ResolveDevices {
+			if n := a.deviceNames[c.DestinationIP]; n != "" {
+				c.DestinationName = n
+			}
+		}
+		if c.DestinationName == "" && cfg.ResolveExternalDNS && cfg.DNSServer != "" && isExternalIP(c.DestinationIP) {
+			if allowLookup {
+				if n := a.resolvePTR(ctx, c.DestinationIP, cfg); n != "" {
+					c.DestinationName = n
+				}
+			} else if ent, ok := a.dnsCache[c.DestinationIP]; ok {
+				c.DestinationName = ent.Name
+			}
+		}
+	}
 }
 
 func collectSessions(ctx context.Context, cfg Config) ([]SessionSample, error) {
@@ -474,17 +574,30 @@ func extractSamples(raw any, groupBy string) []SessionSample {
 		if bytes == 0 {
 			bytes = firstUint(m, []string{"sentbyte", "sent_bytes", "tx_bytes", "orgsentbyte"}) + firstUint(m, []string{"rcvdbyte", "rcvd_bytes", "rx_bytes", "revsentbyte"})
 		}
-		key := firstString(m, []string{"id", "session_id", "serial", "sesid", "uuid"})
-		if key == "" {
-			key = strings.Join([]string{firstString(m, []string{"srcip", "src", "src_ip"}), firstString(m, []string{"dstip", "dst", "dst_ip"}), firstString(m, []string{"sport", "src_port"}), firstString(m, []string{"dport", "dst_port"}), firstString(m, []string{"proto", "protocol"}), firstString(m, []string{"policyid", "policy_id"})}, ":")
-		}
-		if key == ":::::" {
-			key = fmt.Sprintf("row-%d", i)
-		}
 		conv := conversationFromRow(m)
+		key := sessionKeyFromRow(m, conv, i)
 		samples = append(samples, SessionSample{Key: key, Bytes: bytes, Group: groupName(m, groupBy), Conversation: conv})
 	}
 	return samples
+}
+
+func sessionKeyFromRow(m map[string]any, conv Conversation, rowIndex int) string {
+	serial := firstString(m, []string{"serial", "id", "session_id", "sesid", "uuid"})
+	src := conv.SourceIP
+	dst := conv.DestinationIP
+	sport := firstString(m, []string{"sport", "srcport", "src_port", "sourceport", "source_port"})
+	dport := conv.DestinationPort
+	proto := firstString(m, []string{"proto", "protocol"})
+	policy := firstString(m, []string{"policyid", "policy_id", "policy"})
+	srcIntf := firstString(m, []string{"srcintf", "srcintfname", "src_intf", "sourceinterface", "source_interface", "ingressinterface", "ingress_interface"})
+	dstIntf := conv.EgressInterface
+	snatAddr := firstString(m, []string{"snaddr", "natip", "natsrcip", "nat_src_ip", "translatedsrcip", "translated_src_ip"})
+	snatPort := firstString(m, []string{"snport", "natsrcport", "nat_src_port", "translatedsrcport", "translated_src_port"})
+	key := strings.Join([]string{serial, src, sport, dst, dport, proto, policy, srcIntf, dstIntf, snatAddr, snatPort}, "|")
+	if strings.Trim(key, "|") == "" {
+		return fmt.Sprintf("row-%d", rowIndex)
+	}
+	return key
 }
 
 func findLikelyRows(v any) []any {
@@ -797,20 +910,31 @@ func (a *App) resolvePTR(ctx context.Context, ip string, cfg Config) string {
 	if ent, ok := a.dnsCache[ip]; ok && time.Since(ent.T) < time.Duration(cfg.DNSCacheMinutes)*time.Minute {
 		return ent.Name
 	}
-	server := cfg.DNSServer
+	server := strings.TrimSpace(cfg.DNSServer)
+	if server == "" {
+		return ""
+	}
 	if !strings.Contains(server, ":") {
 		server += ":53"
 	}
+	lookupCtx, cancel := context.WithTimeout(ctx, 3*time.Second)
+	defer cancel()
 	d := net.Dialer{Timeout: 2 * time.Second}
 	r := &net.Resolver{PreferGo: true, Dial: func(ctx context.Context, network, address string) (net.Conn, error) {
 		return d.DialContext(ctx, network, server)
 	}}
-	names, err := r.LookupAddr(ctx, ip)
+	names, err := r.LookupAddr(lookupCtx, ip)
 	name := ""
+	errText := ""
 	if err == nil && len(names) > 0 {
 		name = strings.TrimSuffix(names[0], ".")
+	} else if err != nil {
+		errText = err.Error()
+		a.lastDNSError = ip + ": " + errText
+	} else {
+		errText = "no PTR record"
 	}
-	a.dnsCache[ip] = nameCacheEntry{Name: name, T: time.Now()}
+	a.dnsCache[ip] = nameCacheEntry{Name: name, T: time.Now(), Err: errText}
 	return name
 }
 
@@ -868,8 +992,28 @@ func collectDeviceNames(ctx context.Context, cfg Config) (map[string]string, err
 		if m := parseDeviceQueryJSON(b); len(m) > 0 {
 			return m, nil
 		}
+		// Some FortiOS builds return the useful device list only when vdom is omitted. Retry once without vdom.
+		if cfg.VDOM != "" {
+			u2 := strings.TrimRight(cfg.Host, "/") + endpoint
+			req2, _ := http.NewRequestWithContext(ctx, http.MethodGet, u2, nil)
+			if cfg.APIToken != "" {
+				req2.Header.Set("Authorization", "Bearer "+cfg.APIToken)
+			}
+			if resp2, err2 := client.Do(req2); err2 == nil {
+				defer resp2.Body.Close()
+				b2, _ := io.ReadAll(io.LimitReader(resp2.Body, 8<<20))
+				if resp2.StatusCode < 300 {
+					if m := parseDeviceQueryJSON(b2); len(m) > 0 {
+						return m, nil
+					}
+				}
+			}
+		}
 	}
-	return parseDeviceListOutput(string(b)), nil
+	if m := parseDeviceListOutput(string(b)); len(m) > 0 {
+		return m, nil
+	}
+	return nil, fmt.Errorf("device lookup returned no usable IP-to-name mappings from %s", endpoint)
 }
 
 func parseDeviceQueryJSON(b []byte) map[string]string {
@@ -901,10 +1045,19 @@ func parseDeviceQueryJSON(b []byte) map[string]string {
 }
 
 func bestIPFromMap(m map[string]any) string {
-	keys := []string{"ip", "ipaddr", "ip_addr", "ip-address", "ip_address", "ipv4", "ipv4_addr", "ipv4-address", "address", "addr"}
+	keys := []string{"ipv4_address", "ipv4address", "ipv4addr", "ipv4_addr", "ip", "ipaddr", "ip_addr", "ip-address", "ip_address", "ipv4", "ipv4-address", "address", "addr"}
 	for _, k := range keys {
 		if s := stringFieldCI(m, k); s != "" {
 			if ip := firstIPv4(s); ip != "" {
+				return ip
+			}
+		}
+	}
+	// Fallback: accept any field whose name strongly suggests an IPv4 address.
+	for k, v := range m {
+		nk := normalizeFieldName(k)
+		if strings.Contains(nk, "ipv4") || strings.Contains(nk, "ipaddress") || strings.HasSuffix(nk, "ip") {
+			if ip := firstIPv4(fmt.Sprint(v)); ip != "" {
 				return ip
 			}
 		}
@@ -913,7 +1066,7 @@ func bestIPFromMap(m map[string]any) string {
 }
 
 func bestDeviceNameFromMap(m map[string]any) string {
-	keys := []string{"host", "hostname", "host_name", "host-name", "dhcp_host", "dhcp-host", "dhcp_hostname", "dhcp-hostname", "device_name", "device-name", "devname", "name", "alias"}
+	keys := []string{"host", "hostname", "host_name", "host-name", "dhcp_host", "dhcp-host", "dhcp_hostname", "dhcp-hostname", "device_name", "device-name", "devname", "name", "alias", "mac_firewall_address", "hardware_family", "hardware_type"}
 	for _, k := range keys {
 		if s := strings.TrimSpace(stringFieldCI(m, k)); s != "" && net.ParseIP(s) == nil {
 			return strings.Trim(s, "'\"")
@@ -1065,7 +1218,11 @@ func truncate(s string, n int) string {
 }
 func (a *App) broadcastSnapshot() {
 	a.mu.Lock()
-	payload, _ := json.Marshal(map[string]any{"config": sanitized(a.cfg), "status": a.status, "buckets": a.buckets, "conversations": a.currentConversations})
+	buckets := a.enrichedBucketsLocked()
+	convs := append([]Conversation(nil), a.currentConversations...)
+	a.enrichConversationsLocked(convs)
+	dnsNames, dnsNoPTR, _, _ := a.dnsSnapshotLocked()
+	payload, _ := json.Marshal(map[string]any{"config": sanitized(a.cfg), "status": a.status, "buckets": buckets, "conversations": convs, "deviceNames": a.deviceNames, "dnsNames": dnsNames, "dnsNoPtr": dnsNoPTR})
 	clients := make([]chan []byte, 0, len(a.clients))
 	for c := range a.clients {
 		clients = append(clients, c)
